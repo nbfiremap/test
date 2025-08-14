@@ -1,0 +1,464 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>NB Recreation Heatmap — Prototype (v2)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="light" />
+  <style>
+    html, body, #map { height: 100%; margin: 0; }
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Inter, sans-serif; }
+    /* Left toolbar */
+    .toolbar {
+      position: absolute; z-index: 1000; top: 10px; left: 10px;
+      background:#fff; border:1px solid #ddd; border-radius:12px; padding:12px; box-shadow:0 4px 16px rgba(0,0,0,.08);
+      width: 330px; max-width: calc(100vw - 20px);
+    }
+    .toolbar h2 { margin:0 0 8px; font-size:16px; }
+    .row { display:flex; align-items:center; justify-content:space-between; gap:10px; margin:8px 0; flex-wrap: wrap; }
+    .row label { font-size:14px; }
+    input[type="range"] { width: 160px; }
+    .pill { display:inline-flex; align-items:center; gap:8px; padding:6px 10px; border:1px solid #e4e4e7; border-radius:999px; background:#fafafa; font-size:12px; }
+    .pill input { transform: translateY(1px); }
+    select, .btn {
+      border:1px solid #d1d5db; background:#fff; border-radius:8px; padding:6px 10px; cursor:pointer; font-size:14px;
+    }
+    .btn:active { transform: translateY(1px); }
+    .legend { margin-top:6px; font-size:12px; color:#444; }
+    .legend b { display:inline-block; width:10px; height:10px; border-radius:50%; background:black; margin-right:6px; }
+
+    /* Right panel: Top 10 near me */
+    .panel {
+      position:absolute; z-index:1000; top:10px; right:10px; width:340px; max-width: calc(100vw - 20px);
+      background:#fff; border:1px solid #ddd; border-radius:12px; box-shadow:0 4px 16px rgba(0,0,0,.08); overflow:hidden;
+      display:flex; flex-direction:column;
+    }
+    .panel-header { display:flex; align-items:center; justify-content:space-between; padding:10px 12px; border-bottom:1px solid #eee; }
+    .tabs { display:flex; gap:6px; }
+    .tab { padding:6px 10px; border:1px solid #e5e7eb; border-radius:999px; background:#fafafa; font-size:12px; cursor:pointer; }
+    .tab.active { background:#111827; color:#fff; border-color:#111827; }
+    .panel-body { max-height: 46vh; overflow:auto; padding:8px 10px; }
+    .card {
+      border:1px solid #e5e7eb; border-radius:10px; padding:10px; margin:8px 0; display:flex; justify-content:space-between; align-items:center; gap:10px;
+    }
+    .card h4 { margin:0; font-size:14px; }
+    .card .meta { color:#555; font-size:12px; }
+    .credits {
+      position:absolute; z-index:1000; bottom:10px; right:10px; background:#fff; border:1px solid #ddd; border-radius:12px; padding:8px 12px; font-size:12px; color:#444;
+    }
+    .leaflet-popup-content { font-size:14px; }
+    @media (max-width: 860px) {
+      .panel { width: 90vw; }
+      .toolbar { width: 90vw; }
+    }
+  </style>
+
+  <!-- Leaflet + Esri-Leaflet + Heatmap plugin -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://unpkg.com/esri-leaflet@3.0.11/dist/esri-leaflet.js"></script>
+  <script src="https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>
+</head>
+<body>
+  <div id="map"></div>
+
+  <!-- Left controls -->
+  <div class="toolbar">
+    <h2>Explore NB — Recreation Heatmap</h2>
+
+    <div class="row">
+      <label for="basemap">Basemap</label>
+      <select id="basemap">
+        <option value="topo" selected>GeoNB Topographic</option>
+        <option value="imagery">GeoNB Imagery</option>
+        <option value="gray">GeoNB Gray</option>
+      </select>
+    </div>
+
+    <div class="row">
+      <label>Heat intensity</label>
+      <input id="heat-intensity" type="range" min="5" max="50" step="1" value="18">
+      <span id="heat-intensity-value" style="width:28px;text-align:right;">18</span>
+    </div>
+
+    <div class="row" style="gap:8px;">
+      <span class="pill"><input id="toggle-parks" type="checkbox" checked> Parks</span>
+      <span class="pill"><input id="toggle-trails" type="checkbox" checked> Trails</span>
+      <span class="pill"><input id="toggle-ramps" type="checkbox" checked> Boat ramps</span>
+      <span class="pill"><input id="toggle-heat" type="checkbox" checked> Heatmap</span>
+      <span class="pill" title="Show less-crowded places based on local neighbor counts"><input id="toggle-gems" type="checkbox"> Hidden gems</span>
+    </div>
+
+    <div class="row" style="gap:6px;">
+      <button id="btn-near" class="btn">Near me</button>
+      <button id="btn-clear" class="btn">Clear</button>
+      <button id="btn-share" class="btn">Share</button>
+    </div>
+
+    <div class="legend">
+      <div><b style="background:#ef4444"></b> Higher activity density</div>
+      <div><b style="background:#60a5fa"></b> Lower activity density</div>
+      <div style="margin-top:6px;color:#666">Data: Parks, Trails, Boat Ramps (GeoNB)</div>
+    </div>
+  </div>
+
+  <!-- Right panel: Top 10 near me -->
+  <div class="panel" id="panel" style="display:none;">
+    <div class="panel-header">
+      <strong>Top 10 Near Me</strong>
+      <div class="tabs">
+        <div class="tab active" data-tab="ramps">Boat Ramps</div>
+        <div class="tab" data-tab="trails">Trails</div>
+      </div>
+    </div>
+    <div class="panel-body">
+      <div id="list-ramps"></div>
+      <div id="list-trails" style="display:none;"></div>
+    </div>
+  </div>
+
+  <div class="credits">
+    Basemap © <a href="https://geonb.snb.ca/arcgis/rest/services/GeoNB_Basemap_Topo/MapServer" target="_blank">GeoNB</a>. Data: GNB Open Data. Not a legal survey.
+  </div>
+
+<script>
+(function() {
+  // --- Map setup (center/fit NB) ---
+  const nbBounds = L.latLngBounds([44.55, -69.5], [48.25, -63.6]); // loose fit for NB
+  const map = L.map('map', { zoomControl: true }).fitBounds(nbBounds);
+
+  // --- Basemaps (GeoNB) ---
+  // If imagery/gray service names differ, update the URLs below (pattern usually consistent on GeoNB).
+  const baseTopo = L.tileLayer('https://geonb.snb.ca/arcgis/rest/services/GeoNB_Basemap_Topo/MapServer/tile/{z}/{y}/{x}', {
+    attribution: '© Service New Brunswick (GeoNB)'
+  });
+  const baseImagery = L.tileLayer('https://geonb.snb.ca/arcgis/rest/services/GeoNB_Basemap_Imagery/MapServer/tile/{z}/{y}/{x}', {
+    attribution: '© Service New Brunswick (GeoNB)'
+  });
+  const baseGray = L.tileLayer('https://geonb.snb.ca/arcgis/rest/services/GeoNB_Basemap_Gray/MapServer/tile/{z}/{y}/{x}', {
+    attribution: '© Service New Brunswick (GeoNB)'
+  });
+  const basemaps = { topo: baseTopo, imagery: baseImagery, gray: baseGray };
+  basemaps.topo.addTo(map);
+
+  const basemapSelect = document.getElementById('basemap');
+  basemapSelect.addEventListener('change', () => {
+    Object.values(basemaps).forEach(l => { if (map.hasLayer(l)) map.removeLayer(l); });
+    const chosen = basemaps[basemapSelect.value] || basemaps.topo;
+    chosen.addTo(map);
+  });
+
+  // --- Source services (live) ---
+  // Parks (polygons)
+  const parksUrl = 'https://gis-erd-der.gnb.ca/server/rest/services/OpenData/Parks/MapServer/0';
+  // Trails (lines)
+  const trailsUrl = 'https://gis-erd-der.gnb.ca/gisserver/rest/services/Fishing_Regs_Site/BaseMap_Service/MapServer/7';
+  // Boat Ramps (points)
+  const rampsUrl  = 'https://gis-erd-der.gnb.ca/gisserver/rest/services/Fishing_Regs_Site/BaseMap_Service/MapServer/24';
+
+  // --- Display layers ---
+  const parksLayer = L.esri.featureLayer({
+    url: parksUrl,
+    simplifyFactor: 0.5,
+    precision: 5,
+    where: '1=1',
+    style: { color:'#166534', weight:1, fillColor:'#22c55e', fillOpacity:0.15 }
+  });
+
+  const trailsLayer = L.esri.featureLayer({
+    url: trailsUrl,
+    where: '1=1',
+    style: { color:'#8b5cf6', weight:2, opacity:0.7 }
+  });
+
+  const rampsLayer = L.esri.featureLayer({
+    url: rampsUrl,
+    where: '1=1',
+    pointToLayer: function(geojson, latlng) {
+      return L.circleMarker(latlng, {
+        radius:5, color:'#0ea5e9', weight:1.2, fillColor:'#38bdf8', fillOpacity:0.9
+      });
+    }
+  });
+
+  // Popups
+  parksLayer.bindPopup(l => `<b>Provincial Park</b><br/><small>ID: ${l.feature.id ?? l.feature.properties?.OBJECTID ?? ''}</small>`);
+  trailsLayer.bindPopup(() => `<b>Trail / Abandoned Rail</b>`);
+  rampsLayer.bindPopup(l => {
+    const p = l.feature?.properties || {};
+    const name = p.NAME || p.SITE_NAME || p.LOCATION || `Boat Ramp #${p.OBJECTID ?? ''}`;
+    return `<b>${name}</b>`;
+  });
+
+  parksLayer.addTo(map);
+  trailsLayer.addTo(map);
+  rampsLayer.addTo(map);
+
+  // --- Heatmap state ---
+  let heatLayer = L.heatLayer([], { radius: 18, blur: 18, maxZoom: 13, minOpacity: 0.3 }).addTo(map);
+  const heatState = { parks: [], trails: [], ramps: [], gems: { parks: [], trails: [], ramps: [] } };
+  let trailSamplesByFeature = new Map(); // featureId -> [LatLng samples]
+  let rampPoints = []; // [{ll: LatLng, props, layer}]
+  let trailFeatureCentroids = []; // [{ll, props, layer, fid}]
+  let parkCentroids = []; // [{ll, props, layer, fid}]
+
+  function rebuildHeat() {
+    const gemsOn = document.getElementById('toggle-gems').checked;
+    const src = gemsOn ? heatState.gems : heatState;
+    const pts = [];
+    if (document.getElementById('toggle-parks').checked) pts.push(...src.parks);
+    if (document.getElementById('toggle-trails').checked) pts.push(...src.trails);
+    if (document.getElementById('toggle-ramps').checked) pts.push(...src.ramps);
+    heatLayer.setLatLngs(pts);
+    heatLayer[document.getElementById('toggle-heat').checked ? 'addTo' : 'removeFrom'](map);
+  }
+
+  // Centroid for polygons
+  function centroidOf(feature) {
+    try {
+      const gj = feature?.geojson || feature;
+      const g = gj.geometry;
+      const coords = (g.type === 'Polygon') ? g.coordinates[0]
+                  : (g.type === 'MultiPolygon' ? g.coordinates[0][0] : null);
+      if (!coords) return null;
+      let area = 0, cx = 0, cy = 0;
+      for (let i=0, j=coords.length-1; i<coords.length; j=i++) {
+        const [x1,y1] = coords[i], [x2,y2] = coords[j];
+        const f = (x1*y2 - x2*y1); area += f; cx += (x1+x2)*f; cy += (y1+y2)*f;
+      }
+      area *= 0.5; cx /= (6*area); cy /= (6*area);
+      return L.latLng(cy, cx);
+    } catch(e){ return null; }
+  }
+  // Sample a polyline to points every ~N meters
+  function sampleLineToLatLngs(latlngs, everyN = 750) {
+    const out = [];
+    const ll = Array.isArray(latlngs[0]) ? latlngs.flat() : latlngs;
+    for (let i=1; i<ll.length; i++) {
+      const a = ll[i-1], b = ll[i];
+      const segDist = map.distance(a, b);
+      const steps = Math.max(1, Math.floor(segDist / everyN));
+      for (let s=0; s<=steps; s++) {
+        const t = s/steps;
+        out.push(L.latLng(
+          a.lat + (b.lat - a.lat)*t,
+          a.lng + (b.lng - a.lng)*t
+        ));
+      }
+    }
+    return out;
+  }
+
+  // Compute "hidden gems": keep points with few neighbors within 10 km
+  function computeHiddenGems() {
+    const R = 10000; // 10 km
+    function fewNeighbors(arr) {
+      // simple O(n^2) check; arrays are modest—OK in browser
+      const keep = [];
+      for (let i=0; i<arr.length; i++) {
+        let count = 0;
+        for (let j=0; j<arr.length; j++) {
+          if (i===j) continue;
+          const di = map.distance(L.latLng(arr[i][0], arr[i][1]), L.latLng(arr[j][0], arr[j][1]));
+          if (di < R) { count++; if (count>=3) break; }
+        }
+        if (count < 3) keep.push(arr[i]); // "sparse" locality
+      }
+      return keep;
+    }
+    heatState.gems.parks = fewNeighbors(heatState.parks);
+    heatState.gems.ramps = fewNeighbors(heatState.ramps);
+    heatState.gems.trails = fewNeighbors(heatState.trails);
+  }
+
+  // --- Load features and build arrays ---
+  parksLayer.on('load', function() {
+    const arr = []; const centroids = [];
+    parksLayer.eachFeature(function(f) {
+      const c = centroidOf(f);
+      if (c) {
+        arr.push([c.lat, c.lng, 0.8]);
+        centroids.push({ ll: c, props: f.feature?.properties || {}, layer: parksLayer, fid: f.feature?.id || f.feature?.properties?.OBJECTID });
+      }
+    });
+    heatState.parks = arr;
+    parkCentroids = centroids;
+    computeHiddenGems();
+    rebuildHeat();
+  });
+
+  trailsLayer.on('load', function() {
+    const arr = [];
+    trailSamplesByFeature.clear();
+    trailsLayer.eachFeature(function(f) {
+      const gj = f.geojson;
+      if (!gj || !gj.geometry) return;
+      let samples = [];
+      if (gj.geometry.type === 'LineString') {
+        const latlngs = gj.geometry.coordinates.map(c=>L.latLng(c[1], c[0]));
+        samples = sampleLineToLatLngs(latlngs, 750);
+      } else if (gj.geometry.type === 'MultiLineString') {
+        gj.geometry.coordinates.forEach(line => {
+          const latlngs = line.map(c=>L.latLng(c[1], c[0]));
+          samples.push(...sampleLineToLatLngs(latlngs, 750));
+        });
+      }
+      if (samples.length) {
+        const fid = f.feature?.id || f.feature?.properties?.OBJECTID;
+        trailSamplesByFeature.set(fid, samples);
+        // centroid for "near me" ranking
+        const b = L.latLngBounds(samples);
+        const center = b.getCenter();
+        trailFeatureCentroids.push({ ll: center, props: f.feature?.properties || {}, layer: trailsLayer, fid });
+        arr.push(...samples.map(p=>[p.lat, p.lng, 0.6]));
+      }
+    });
+    heatState.trails = arr;
+    computeHiddenGems();
+    rebuildHeat();
+  });
+
+  rampsLayer.on('load', function() {
+    const arr = []; const pts = [];
+    rampsLayer.eachFeature(function(f) {
+      const ll = f.getLatLng();
+      arr.push([ll.lat, ll.lng, 0.9]);
+      pts.push({ ll, props: f.feature?.properties || {}, layer: rampsLayer });
+    });
+    heatState.ramps = arr;
+    rampPoints = pts;
+    computeHiddenGems();
+    rebuildHeat();
+  });
+
+  // --- UI wiring ---
+  const intensity = document.getElementById('heat-intensity');
+  const intensityVal = document.getElementById('heat-intensity-value');
+  intensity.addEventListener('input', () => {
+    const v = Number(intensity.value);
+    intensityVal.textContent = v;
+    heatLayer.setOptions({ radius: v, blur: v });
+  });
+  ['toggle-parks','toggle-trails','toggle-ramps','toggle-heat','toggle-gems'].forEach(id=>{
+    document.getElementById(id).addEventListener('change', rebuildHeat);
+  });
+
+  // Share: encodes center/zoom + toggles + intensity
+  function applyFromHash() {
+    const h = new URLSearchParams(location.hash.replace('#',''));
+    const z = +h.get('z'), x = +h.get('x'), y = +h.get('y');
+    if (!isNaN(z) && !isNaN(x) && !isNaN(y)) map.setView([y,x], z);
+    ['toggle-parks','toggle-trails','toggle-ramps','toggle-heat','toggle-gems'].forEach(id=>{
+      const v = h.get(id);
+      if (v !== null) document.getElementById(id).checked = (v === '1');
+    });
+    const r = +h.get('r');
+    if (!isNaN(r) && r>0) { heatLayer.setOptions({ radius:r, blur:r }); intensity.value=r; intensityVal.textContent=r; }
+    const bm = h.get('bm');
+    if (bm && basemaps[bm]) { basemapSelect.value = bm; basemapSelect.dispatchEvent(new Event('change')); }
+    rebuildHeat();
+  }
+  function writeHash() {
+    const c = map.getCenter(), z = map.getZoom();
+    const h = new URLSearchParams();
+    h.set('z', z); h.set('x', c.lng.toFixed(5)); h.set('y', c.lat.toFixed(5));
+    ['toggle-parks','toggle-trails','toggle-ramps','toggle-heat','toggle-gems'].forEach(id=>{
+      h.set(id, document.getElementById(id).checked ? '1' : '0');
+    });
+    h.set('r', intensity.value);
+    h.set('bm', basemapSelect.value);
+    return '#'+h.toString();
+  }
+  document.getElementById('btn-share').onclick = function() {
+    const url = location.origin + location.pathname + writeHash();
+    navigator.clipboard?.writeText(url);
+    alert('Share link copied:\n' + url);
+  };
+  map.on('moveend zoomend', () => history.replaceState(null, '', writeHash()));
+  window.addEventListener('hashchange', applyFromHash);
+  applyFromHash();
+
+  // --- Near me + Top 10 lists ---
+  let meMarker = null, meCircle = null;
+  const panel = document.getElementById('panel');
+  const listRamps = document.getElementById('list-ramps');
+  const listTrails = document.getElementById('list-trails');
+
+  function fmtKm(m) { return (m/1000).toFixed(m<10000 ? 1 : 0) + ' km'; }
+
+  function rankNearest(originLL, items, getPoint, labelFn, onZoom) {
+    const ranked = items.map((it, idx) => {
+      const ll = getPoint(it);
+      return { it, d: map.distance(originLL, ll), idx };
+    }).sort((a,b)=>a.d-b.d).slice(0,10);
+    return ranked.map(({it, d}) => {
+      const el = document.createElement('div');
+      el.className = 'card';
+      const title = document.createElement('div');
+      title.innerHTML = `<h4>${labelFn(it)}</h4><div class="meta">${fmtKm(d)} away</div>`;
+      const zbtn = document.createElement('button');
+      zbtn.className = 'btn';
+      zbtn.textContent = 'Zoom';
+      zbtn.onclick = () => onZoom(it);
+      el.appendChild(title);
+      el.appendChild(zbtn);
+      return el;
+    });
+  }
+
+  // Tabs toggle
+  Array.from(document.querySelectorAll('.tab')).forEach(tab=>{
+    tab.addEventListener('click', ()=>{
+      Array.from(document.querySelectorAll('.tab')).forEach(t=>t.classList.remove('active'));
+      tab.classList.add('active');
+      const which = tab.getAttribute('data-tab');
+      listRamps.style.display = (which==='ramps') ? '' : 'none';
+      listTrails.style.display = (which==='trails') ? '' : 'none';
+    });
+  });
+
+  document.getElementById('btn-near').onclick = function() {
+    if (!navigator.geolocation) { alert('Geolocation not supported.'); return; }
+    navigator.geolocation.getCurrentPosition(pos => {
+      const ll = L.latLng(pos.coords.latitude, pos.coords.longitude);
+      if (meMarker) { map.removeLayer(meMarker); map.removeLayer(meCircle); }
+      meMarker = L.marker(ll).addTo(map).bindPopup('You are here').openPopup();
+      meCircle = L.circle(ll, { radius: 60000, color:'#111827', weight:1, fillColor:'#3b82f6', fillOpacity:.08 }).addTo(map);
+      map.setView(ll, 9);
+
+      // Build Top 10 lists
+      panel.style.display = '';
+
+      // Ramps
+      listRamps.innerHTML = '';
+      const rampCards = rankNearest(
+        ll,
+        rampPoints,
+        r => r.ll,
+        r => (r.props.NAME || r.props.SITE_NAME || r.props.LOCATION || `Boat Ramp #${r.props.OBJECTID ?? ''}`),
+        r => { map.setView(r.ll, 14); r.layer.eachFeature?.(()=>{}); }
+      );
+      rampCards.forEach(c => listRamps.appendChild(c));
+
+      // Trails (use centroids of sampled segments per feature)
+      listTrails.innerHTML = '';
+      const trailCards = rankNearest(
+        ll,
+        trailFeatureCentroids,
+        t => t.ll,
+        t => (t.props.NAME || t.props.TRAIL_NAME || `Trail #${t.fid ?? ''}`),
+        t => { map.setView(t.ll, 14); }
+      );
+      trailCards.forEach(c => listTrails.appendChild(c));
+    }, () => alert('Could not get your location.'));
+  };
+
+  document.getElementById('btn-clear').onclick = function() {
+    if (meMarker) { map.removeLayer(meMarker); meMarker = null; }
+    if (meCircle) { map.removeLayer(meCircle); meCircle = null; }
+    document.getElementById('panel').style.display = 'none';
+  };
+})();
+</script>
+</body>
+</html>
